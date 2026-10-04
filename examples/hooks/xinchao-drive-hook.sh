@@ -11,11 +11,11 @@
 #   - 先看「此刻」里标了（涌）/（涨）的：被事件顶上去、或两小时内明显起来了；
 #   - 都没有 → 看全部驱力里「满」的：停在自己的静息线上一动不动满 XINCHAO_DRIVE_FULL_H 小时，
 #     轮流挑最久没提示过的（只认涌/涨的话，没事的日子里驱力全是"平"，他会一直沉默）；
-#   - 刚被满足、还在饱足平台上的不算满；想沉淀静息线最低、一存觉察就涌，要高于 XINCHAO_DRIVE_REFLECTION_MIN 才算涌。
+#   - 刚被满足、还在饱足平台上的不算满；反思（3.3 叫想沉淀）静息线最低、一存觉察就涌，要高于 XINCHAO_DRIVE_REFLECTION_MIN 才算涌。
 # 防刷屏：同一驱力 XINCHAO_DRIVE_COOLDOWN_H 小时内不重提；一天最多 XINCHAO_DRIVE_DAILY_MAX 次，
 # 其中夜里（XINCHAO_DRIVE_NIGHT_START～XINCHAO_DRIVE_NIGHT_END 点）单算最多 XINCHAO_DRIVE_NIGHT_MAX 次。夜里照提，末尾加一句 XINCHAO_DRIVE_NIGHT_NOTE。
 #
-# 需要心潮念 3.3.7 及以上（此刻里的 涌/涨/平 与驱力轨迹 driveTrail）。只用 bash + curl + python3，任何一步失败都静默退出 0。
+# 需要心潮念 3.3.7 及以上（此刻里的 涌/涨/平 与驱力轨迹 driveTrail）；4.0 的新驱力名和细分写法也认。只用 bash + curl + python3，任何一步失败都静默退出 0。
 #
 # 环境变量（可写在 XINCHAO_HOOK_ENV_FILE 指向的文件里，默认 ~/.xinchao-hook.env，权限 600，和「此刻」钩子共用）：
 #   XINCHAO_URL / XINCHAO_TOKEN          同「此刻」钩子
@@ -76,19 +76,36 @@ except Exception: sys.exit(0)
 text = now_blk.get("text", "")
 if now_blk.get("ok") is not True or not text: sys.exit(0)
 
-NAMES = {"possess": "想她", "monitor": "惦记她", "crave": "馋她", "share": "想分享", "reflection": "想沉淀",
-         "curiosity": "好奇", "boredom": "无聊", "social": "想热闹", "duty": "想把事推进", "libido": "身体想要她"}
+# 驱力名 → 驱力 key。心潮念 4.0 改了几个名字（牵挂/分享欲/反思/野心/情欲，新增偏爱，馋并进想念、社交并进分享欲），
+# 3.3 的旧名字照样认：drive-actions.json 用新名旧名都行，3.3 和 4.0 的心潮都能用。
+NAME4 = {"possess": "想她", "monitor": "牵挂", "share": "分享欲", "reflection": "反思", "curiosity": "好奇",
+         "boredom": "无聊", "duty": "野心", "libido": "情欲", "favored": "偏爱", "grieve": "难过", "anger": "愤怒"}
+OLD = {"惦记她": "monitor", "馋她": "crave", "想分享": "share", "想沉淀": "reflection", "想热闹": "social",
+       "想把事推进": "duty", "身体想要她": "libido"}
+MERGED = {"crave": "possess", "social": "share"}          # 4.0 合并掉的旧 key
+KEY_OF = {**{v: k for k, v in NAME4.items()}, **OLD}
+canon = lambda k: MERGED.get(k, k)
+def action_for(key):
+    for name, act in ACTIONS.items():
+        if canon(KEY_OF.get(name, "")) == canon(key): return act
+    return None
+
 now = time.time()
 iso = lambda x: datetime.datetime.fromisoformat(str(x).replace("Z", "+00:00")).timestamp()
 m = re.search(r"驱力：(.+)", text)
-hot = [(n, l) for n, l in re.findall(r"([^、（\s]+)（(涌|涨)）", m.group(1)) if n in ACTIONS] if m else []
+shown = {}                                                 # key → 此刻里写的名字（提示用它，和窗口里看到的一致）
+hot = []
+if m:
+    for n, l in re.findall(r"([^、（\s]+)（(涌|涨)(?:·[^）]*)?）", m.group(1)):   # 4.0 会带细分：偏爱（涨·吃醋）
+        k = KEY_OF.get(n)
+        if k and action_for(k): shown[canon(k)] = n; hot.append((canon(k), l))
 full = {}
 try:
     st8 = get("/v1/state")
     drives = st8.get("drives") or {}; trail = st8.get("driveTrail") or []; plat = st8.get("satisfactionPlateaus") or {}
-    hot = [(n, l) for n, l in hot if not (n == "想沉淀" and l == "涌" and float(drives.get("reflection", 0)) < num("XINCHAO_DRIVE_REFLECTION_MIN", 0.54))]
-    for k, n in NAMES.items():
-        if n not in ACTIONS: continue
+    hot = [(k, l) for k, l in hot if not (k == "reflection" and l == "涌" and float(drives.get("reflection", 0)) < num("XINCHAO_DRIVE_REFLECTION_MIN", 0.54))]
+    for k in drives:
+        if k in MERGED or not action_for(k): continue
         v = float(drives.get(k, 0))
         if v < 0.25: continue
         try:
@@ -99,7 +116,7 @@ try:
             pv = (p.get("drives") or {}).get(k)
             if pv is None or abs(float(pv) - v) > 0.01: break
             since = iso(p["at"])
-        if now - since >= num("XINCHAO_DRIVE_FULL_H", 2) * 3600: full[n] = (now - since) / 3600
+        if now - since >= num("XINCHAO_DRIVE_FULL_H", 2) * 3600: full[k] = (now - since) / 3600
 except Exception: pass
 
 P = os.path.join(S, "drive.json")
@@ -121,10 +138,10 @@ st["count"] += 1
 if night: st["night"] += 1
 st["last"][pick[0][0]] = now
 json.dump(st, open(P, "w"), ensure_ascii=False)
-n, tag = pick[0]
+k, tag = pick[0]
 print(text.strip()); print()
 print("【心潮·驱力提示｜参考不是指令】")
-print("· " + n + tag + "：" + ACTIONS[n])
+print("· " + shown.get(k, NAME4.get(k, k)) + tag + "：" + action_for(k))
 if night: print("· " + (E.get("XINCHAO_DRIVE_NIGHT_NOTE") or "现在是深夜，她在睡：出声吵醒她的先别，其他随意。"))
 print("这一轮可以按上面的劲儿去做点什么，也可以不做；不想动就只回一个「·」。今天第 %d 次。" % st["count"])
 PY
